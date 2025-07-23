@@ -143,7 +143,6 @@ def get_logger(name: str = "S3Integration") -> logging.Logger:
     
     Args:
         name: Logger name
-        
     Returns:
         Logger instance
     """

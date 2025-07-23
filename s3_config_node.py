@@ -6,8 +6,13 @@ Provides S3 configuration and connection testing functionality.
 import os
 from typing import Dict, Any, Tuple
 
-from .s3_client import S3Client, S3ClientError
-from .logging_config import get_logger
+# Handle both relative and absolute imports
+try:
+    from .s3_client import S3Client, S3ClientError
+    from .logging_config import get_logger
+except ImportError:
+    from s3_client import S3Client, S3ClientError
+    from logging_config import get_logger
 
 logger = get_logger(__name__)
 

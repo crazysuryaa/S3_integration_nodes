@@ -3,9 +3,15 @@
 Defines the mapping between node classes and their display names for ComfyUI.
 """
 
-from .s3_config_node import S3ConfigNode
-from .s3_image_node import S3ImageNode
-from .s3_video_node import S3VideoNode
+# Handle both relative and absolute imports
+try:
+    from .s3_config_node import S3ConfigNode
+    from .s3_image_node import S3ImageNode
+    from .s3_video_node import S3VideoNode
+except ImportError:
+    from s3_config_node import S3ConfigNode
+    from s3_image_node import S3ImageNode
+    from s3_video_node import S3VideoNode
 
 # Node class mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
