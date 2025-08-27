@@ -1,10 +1,9 @@
 import os
 import tempfile
-from PIL import Image, ImageOps
 import torch
+import torchaudio
 import numpy as np
 
-# Handle both relative and absolute imports
 try:
     from .s3_client import get_s3_client
     from .logging_config import get_logger
@@ -15,8 +14,8 @@ except ImportError:
 logger = get_logger(__name__)
 
 
-class S3ImageNode:
-    """Unified S3 Image Node for loading and saving images"""
+class S3AudioNode:
+    """Unified S3 Audio Node for loading and saving audio files"""
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -26,16 +25,16 @@ class S3ImageNode:
                 "s3_path": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "path/to/image.jpg"
+                    "placeholder": "path/to/audio.wav"
                 })
             },
             "optional": {
-                "image": ("IMAGE",),  # Required for save operation
+                "audio": ("AUDIO",),  # Required for save operation
                 "use_input_dir": ("BOOLEAN", {"default": True}),
                 "use_output_dir": ("BOOLEAN", {"default": True}),
-                "filename_prefix": ("STRING", {"default": "ComfyUI"}),
-                "quality": ("INT", {"default": 95, "min": 1, "max": 100}),
-                "format": (["JPEG", "PNG", "WEBP"], {"default": "JPEG"}),
+                "format": (["wav", "mp3", "flac", "ogg"], {"default": "wav"}),
+                "sample_rate": ("INT", {"default": 44100, "min": 8000, "max": 192000}),
+                "bits_per_sample": ("INT", {"default": 16, "min": 8, "max": 32}),
                 "keep_local_copy": ("BOOLEAN", {"default": False}),
                 "delete_local": ("BOOLEAN", {"default": False}),
                 "use_workflow_config": ("BOOLEAN", {"default": False}),
@@ -78,16 +77,16 @@ class S3ImageNode:
         }
     
     CATEGORY = "S3Integration"
-    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
-    RETURN_NAMES = ("image", "local_path", "s3_path")
-    FUNCTION = "process_image"
+    RETURN_TYPES = ("AUDIO", "INT", "STRING", "STRING")
+    RETURN_NAMES = ("audio", "sample_rate", "local_path", "s3_path")
+    FUNCTION = "process_audio"
     OUTPUT_NODE = True
     
-    def process_image(self, operation, s3_path, image=None, use_input_dir=True, use_output_dir=True, 
-                     filename_prefix="ComfyUI", quality=95, format="JPEG", keep_local_copy=False, delete_local=False,
-                     use_workflow_config=False, region="", access_key="", secret_key="", bucket_name="", 
+    def process_audio(self, operation, s3_path, audio=None, use_input_dir=True, use_output_dir=True,
+                     format="wav", sample_rate=44100, bits_per_sample=16, keep_local_copy=False, delete_local=False,
+                     use_workflow_config=False, region="", access_key="", secret_key="", bucket_name="",
                      endpoint_url="", input_dir="input/", output_dir="output/"):
-        """Process image based on operation type"""
+        """Process audio based on operation type"""
         
         if not s3_path.strip():
             raise ValueError("S3 path cannot be empty")
@@ -102,16 +101,16 @@ class S3ImageNode:
             raise RuntimeError("Failed to initialize S3 client")
         
         if operation == "load":
-            return self._load_image(s3_path, use_input_dir, keep_local_copy, s3_client)
+            return self._load_audio(s3_path, use_input_dir, keep_local_copy, s3_client)
         elif operation == "save":
-            if image is None:
-                raise ValueError("Image input is required for save operation")
-            return self._save_image(image, s3_path, use_output_dir, filename_prefix, quality, format, delete_local, s3_client)
+            if audio is None:
+                raise ValueError("Audio input is required for save operation")
+            return self._save_audio(audio, s3_path, use_output_dir, format, sample_rate, bits_per_sample, delete_local, s3_client)
         else:
             raise ValueError(f"Unknown operation: {operation}")
     
-    def _load_image(self, s3_path, use_input_dir=True, keep_local_copy=False, s3_instance=None):
-        """Load image from S3"""
+    def _load_audio(self, s3_path, use_input_dir=True, keep_local_copy=False, s3_instance=None):
+        """Load audio from S3"""
         
         try:
             if s3_instance is None:
@@ -144,7 +143,7 @@ class S3ImageNode:
             
             if keep_local_copy:
                 # Save to persistent location
-                local_dir = os.path.join("temp", "images")
+                local_dir = os.path.join("temp", "audio")
                 os.makedirs(local_dir, exist_ok=True)
                 local_path = os.path.join(local_dir, filename)
             else:
@@ -153,111 +152,21 @@ class S3ImageNode:
                 local_path = temp_file.name
                 temp_file.close()
             
-            # Download image from S3
-            logger.info(f"Downloading image from S3: {full_s3_path}")
+            # Download audio file from S3
+            logger.info(f"Downloading audio file from S3: {full_s3_path}")
             downloaded_path = s3_instance.download_file(full_s3_path, local_path)
             
             if downloaded_path is None:
-                raise RuntimeError(f"Failed to download image from S3: {full_s3_path}")
+                raise RuntimeError(f"Failed to download audio file from S3: {full_s3_path}")
             
-            # Debug: Check file content
-            file_size = os.path.getsize(downloaded_path)
-            with open(downloaded_path, 'rb') as f:
-                header = f.read(50)
+            # Load audio using torchaudio
+            waveform, sample_rate = torchaudio.load(downloaded_path)
             
-            logger.info(f"Downloaded file: size={file_size} bytes")
-            logger.info(f"File header hex: {header.hex()}")
-            logger.info(f"File header ASCII: {header[:30]}")
-            
-            # Check for common image signatures
-            png_sig = b'\x89PNG\r\n\x1a\n'
-            jpg_sig = b'\xff\xd8\xff'
-            
-            if header.startswith(png_sig):
-                logger.info("File signature: Valid PNG")
-            elif header.startswith(jpg_sig):
-                logger.info("File signature: Valid JPEG")
-            elif header.startswith(b'<?xml') or header.startswith(b'<!DOCTYPE') or header.startswith(b'<html'):
-                logger.error(f"ERROR: File is XML/HTML, likely S3 error response!")
-                with open(downloaded_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read(1000)
-                logger.error(f"File content: {content}")
-                raise RuntimeError(f"S3 returned error page instead of image for: {full_s3_path}")
-            else:
-                logger.warning(f"Unknown file signature: {header[:10]}")
-            
-            # Load and process image
-            try:
-                img = Image.open(downloaded_path)
-                img = ImageOps.exif_transpose(img)  # Handle EXIF rotation
-            except Exception as e:
-                logger.warning(f"First attempt to open image failed: {str(e)}")
-                
-                # Try alternative loading methods
-                try:
-                    # Method 1: Re-read and re-save the file
-                    with open(downloaded_path, 'rb') as f:
-                        file_data = f.read()
-                    
-                    # Create new temp file and write data
-                    alt_temp = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                    alt_temp.write(file_data)
-                    alt_temp.close()
-                    
-                    img = Image.open(alt_temp.name)
-                    logger.info(f"Successfully opened image using alternative method 1")
-                    
-                    # Clean up alternative temp file
-                    try:
-                        os.remove(alt_temp.name)
-                    except:
-                        pass
-                        
-                except Exception as e2:
-                    logger.warning(f"Alternative method 1 failed: {str(e2)}")
-                    
-                    try:
-                        # Method 2: Use imageio or cv2 if available, then convert to PIL
-                        import cv2
-                        img_array = cv2.imread(downloaded_path, cv2.IMREAD_UNCHANGED)
-                        if img_array is None:
-                            raise ValueError("cv2 couldn't read the image")
-                        
-                        # Convert BGR to RGB if needed
-                        if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-                            img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-                        elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
-                            img_array = cv2.cvtColor(img_array, cv2.COLOR_BGRA2RGBA)
-                        
-                        img = Image.fromarray(img_array)
-                        logger.info(f"Successfully opened image using cv2")
-                        
-                    except Exception as e3:
-                        logger.error(f"All methods failed to open image")
-                        logger.error(f"PIL error: {str(e)}")
-                        logger.error(f"File exists: {os.path.exists(downloaded_path)}, Size: {file_size}")
-                        
-                        # Save debug copy
-                        debug_path = f"/tmp/debug_{os.path.basename(downloaded_path)}"
-                        import shutil
-                        shutil.copy2(downloaded_path, debug_path)
-                        logger.info(f"Saved debug copy to: {debug_path}")
-                        
-                        # Last resort: try to load without EXIF transpose
-                        try:
-                            img = Image.open(downloaded_path)
-                            logger.info("Opened without EXIF transpose")
-                            # Skip EXIF transpose in this case
-                            img = img
-                        except:
-                            raise RuntimeError(f"Cannot open image despite valid PNG header: {str(e)}")
-            
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            # Convert to tensor
-            img_array = np.array(img).astype(np.float32) / 255.0
-            img_tensor = torch.from_numpy(img_array)[None,]
+            # Convert to ComfyUI audio format (dict with waveform and sample_rate)
+            audio_dict = {
+                "waveform": waveform.unsqueeze(0),  # Add batch dimension
+                "sample_rate": sample_rate
+            }
             
             # Clean up temporary file if not keeping local copy
             if not keep_local_copy:
@@ -266,17 +175,17 @@ class S3ImageNode:
                 except:
                     pass
             
-            logger.info(f"Successfully loaded image from S3: {full_s3_path}")
-            return (img_tensor, downloaded_path if keep_local_copy else "", full_s3_path)
+            logger.info(f"Successfully loaded audio from S3: {full_s3_path}")
+            return (audio_dict, sample_rate, downloaded_path if keep_local_copy else "", full_s3_path)
             
         except Exception as e:
-            error_msg = f"Failed to load image from S3 path '{s3_path}': {str(e)}"
+            error_msg = f"Failed to load audio from S3 path '{s3_path}': {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
     
-    def _save_image(self, image, s3_path, use_output_dir=True, filename_prefix="ComfyUI", 
-                   quality=95, format="JPEG", delete_local=False, s3_instance=None):
-        """Save image to S3"""
+    def _save_audio(self, audio, s3_path, use_output_dir=True, format="wav", sample_rate=44100, 
+                   bits_per_sample=16, delete_local=False, s3_instance=None):
+        """Save audio to S3"""
         
         try:
             if s3_instance is None:
@@ -300,59 +209,59 @@ class S3ImageNode:
                 else:
                     full_s3_path = s3_path
             
-            # Convert tensor to PIL Image
-            i = 255. * image[0].cpu().numpy()
-            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-            
-            # Determine format from s3_path extension (ignore format parameter)
-            path_extension = os.path.splitext(s3_path)[1].lower()
-            if path_extension in ['.jpg', '.jpeg']:
-                file_format = 'JPEG'
-                file_extension = 'jpg'
-            elif path_extension == '.png':
-                file_format = 'PNG'
-                file_extension = 'png'
-            elif path_extension == '.webp':
-                file_format = 'WEBP'
-                file_extension = 'webp'
+            # Extract waveform and sample rate from audio dict
+            if isinstance(audio, dict):
+                waveform = audio.get("waveform")
+                audio_sample_rate = audio.get("sample_rate", sample_rate)
             else:
-                # Default to PNG if no extension or unknown extension
-                file_format = 'PNG'
-                file_extension = 'png'
+                # Assume it's a raw waveform tensor
+                waveform = audio
+                audio_sample_rate = sample_rate
             
-            # Create temporary file with correct extension
+            # Remove batch dimension if present
+            if waveform.dim() == 3:
+                waveform = waveform.squeeze(0)
+            
+            # Resample if necessary
+            if audio_sample_rate != sample_rate:
+                resampler = torchaudio.transforms.Resample(audio_sample_rate, sample_rate)
+                waveform = resampler(waveform)
+            
+            # Create temporary file
+            file_extension = format.lower()
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}')
             temp_path = temp_file.name
             temp_file.close()
             
-            # Save image with appropriate format and quality
-            save_kwargs = {}
-            if file_format in ['JPEG', 'WEBP']:
-                save_kwargs['quality'] = quality
-                save_kwargs['optimize'] = True
-            
-            img.save(temp_path, format=file_format, **save_kwargs)
+            # Save audio file
+            if format == "mp3":
+                # MP3 requires special handling
+                torchaudio.save(temp_path, waveform, sample_rate, format="mp3", 
+                              encoding="PCM_S", bits_per_sample=bits_per_sample)
+            else:
+                torchaudio.save(temp_path, waveform, sample_rate, 
+                              bits_per_sample=bits_per_sample if format == "wav" else None)
             
             # Upload to S3
-            logger.info(f"Uploading image to S3: {temp_path} -> {full_s3_path}")
+            logger.info(f"Uploading audio file to S3: {temp_path} -> {full_s3_path}")
             uploaded_path = s3_instance.upload_file(temp_path, full_s3_path)
             
             if uploaded_path is None:
-                raise RuntimeError(f"Failed to upload image to S3: {full_s3_path}")
+                raise RuntimeError(f"Failed to upload audio file to S3: {full_s3_path}")
             
             # Clean up or keep local file
             if delete_local:
                 try:
                     os.remove(temp_path)
-                    logger.info(f"Deleted local image file: {temp_path}")
+                    logger.info(f"Deleted local audio file: {temp_path}")
                 except Exception as e:
-                    logger.warning(f"Failed to delete local image file: {e}")
+                    logger.warning(f"Failed to delete local audio file: {e}")
             
-            logger.info(f"Successfully saved image to S3: {uploaded_path}")
-            return (image, temp_path if not delete_local else "", uploaded_path)
+            logger.info(f"Successfully saved audio to S3: {uploaded_path}")
+            return (audio, sample_rate, temp_path if not delete_local else "", uploaded_path)
             
         except Exception as e:
-            error_msg = f"Failed to save image to S3 path '{s3_path}': {str(e)}"
+            error_msg = f"Failed to save audio to S3 path '{s3_path}': {str(e)}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
     
